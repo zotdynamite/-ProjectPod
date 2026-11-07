@@ -1,0 +1,189 @@
+@import url("https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Space+Grotesk:wght@400;500;600;700&display=swap");
+:root{
+  --bg:#08070c;--ink:#f5f2fa;--muted:#9d98ad;--card:rgba(255,255,255,.035);--line:rgba(255,255,255,.1);
+  --lime:#dff150;--violet:#8b6fff;--pink:#ff5ab7;
+}
+*{box-sizing:border-box}
+html{color-scheme:dark}
+body{
+  margin:0;min-height:100vh;color:var(--ink);
+  font:16px/1.5 "Space Grotesk",system-ui,sans-serif;
+  background:var(--bg);
+  -webkit-font-smoothing:antialiased;
+}
+.aura{
+  pointer-events:none;position:fixed;inset:0 0 auto 0;height:760px;z-index:0;
+  background:
+    radial-gradient(640px circle at 12% 0%,rgba(139,111,255,.28),transparent 55%),
+    radial-gradient(620px circle at 88% 8%,rgba(255,90,183,.16),transparent 52%);
+}
+a{color:#c6b8ff}
+h1,h2{margin:.15em 0 .35em;letter-spacing:-.035em;line-height:1.05;font-weight:600}
+h1{font-size:clamp(2.4rem,6vw,4.6rem)}
+h2{font-size:clamp(1.4rem,2.4vw,1.85rem)}
+h1 em{font-family:"Instrument Serif",Georgia,serif;font-style:italic;font-weight:400;color:var(--lime)}
+.sr{position:absolute;left:-9999px}
+.preview{position:relative;z-index:3;background:#000;color:#8d889c;text-align:center;font-size:.72rem;letter-spacing:.08em;text-transform:uppercase;padding:7px}
+.top{
+  position:sticky;top:0;z-index:5;display:flex;flex-wrap:wrap;gap:12px;align-items:center;
+  padding:16px 5vw;background:rgba(8,7,12,.72);backdrop-filter:blur(18px);
+}
+.brand{display:flex;gap:10px;align-items:center;text-decoration:none;color:var(--ink);font:600 1.15rem/1 "Space Grotesk",sans-serif}
+.brand img{border-radius:11px}
+.brand b{color:var(--lime)}
+nav{display:flex;gap:22px;flex:1;justify-content:center}
+nav a{text-decoration:none;color:rgba(255,255,255,.62);font-size:.95rem;font-weight:500}
+nav a.on,nav a:hover{color:var(--lime)}
+.cta-top{margin-left:auto}
+main{position:relative;z-index:1;max-width:1120px;margin:auto;padding:28px 5vw 80px}
+.live{
+  display:inline-flex;align-items:center;gap:10px;padding:6px 12px;border:1px solid var(--line);
+  border-radius:999px;font-size:.72rem;letter-spacing:.16em;text-transform:uppercase;color:rgba(255,255,255,.68);margin-bottom:18px;
+}
+.eq{display:flex;align-items:flex-end;gap:2px;height:12px}
+.eq i{display:block;width:2px;height:100%;background:var(--lime);transform-origin:bottom;animation:eq 1.05s ease-in-out infinite}
+.eq i:nth-child(2){animation-delay:.1s}.eq i:nth-child(3){animation-delay:.2s}
+.eq i:nth-child(4){animation-delay:.28s}.eq i:nth-child(5){animation-delay:.14s}
+@keyframes eq{0%,100%{transform:scaleY(.28)}50%{transform:scaleY(1)}}
+.hero{padding:18px 0 10px}
+.hero>p{max-width:620px;color:var(--muted);font-size:1.12rem}
+.hero-tools{margin-top:28px;display:grid;gap:22px}
+.search{display:flex;align-items:center;gap:8px;padding:6px 6px 6px 16px;border:1px solid var(--line);border-radius:16px;background:rgba(255,255,255,.04)}
+.search input{flex:1;border:0;background:transparent;color:var(--ink);font:inherit;padding:10px 0;outline:none}
+.search input::placeholder{color:#6f6a80}
+.statline{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+.statline div{border-left:2px solid rgba(223,241,80,.45);padding:2px 0 2px 12px}
+.statline b{display:block;font-size:1.55rem;letter-spacing:-.03em}
+.statline span{display:block;margin-top:2px;font-size:.68rem;letter-spacing:.08em;text-transform:uppercase;color:#7e798f}
+.btn{
+  display:inline-flex;align-items:center;justify-content:center;gap:6px;border:0;cursor:pointer;
+  background:var(--lime);color:#14120a;font:600 .95rem "Space Grotesk",sans-serif;
+  padding:11px 16px;border-radius:999px;text-decoration:none;transition:.15s ease;
+}
+.btn:hover{background:#fff;transform:translateY(-1px)}
+.btn.ghost{background:transparent;color:var(--ink);border:1px solid var(--line)}
+.btn.ghost:hover{border-color:#fff;background:transparent;color:#fff}
+.btn.boost{background:var(--violet);color:#fff}
+.cta{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.cta form{margin:0}
+section{margin:42px 0}
+.sec-h{display:flex;justify-content:space-between;align-items:flex-end;gap:16px;flex-wrap:wrap;margin-bottom:8px}
+.sec-h a{font-weight:600;text-decoration:none;color:var(--lime)}
+.eyebrow{margin:0 0 6px;font-size:.72rem;letter-spacing:.16em;text-transform:uppercase;color:#8a849b}
+.note,.muted{color:var(--muted);font-size:.95rem}
+.featgrid,.rows{display:grid;gap:12px}
+.featgrid{grid-template-columns:1fr 1fr}
+.showrow{
+  display:grid;grid-template-columns:56px 1fr auto;gap:16px;align-items:center;
+  padding:16px 18px;border:1px solid var(--line);border-radius:20px;
+  background:var(--card);text-decoration:none;color:var(--ink);transition:.2s ease;
+}
+.showrow:hover{border-color:rgba(223,241,80,.4);transform:translateY(-2px);background:rgba(255,255,255,.05)}
+.showrow-body h3{margin:0 0 4px;font-size:1.08rem;letter-spacing:-.02em}
+.showrow .meta{margin:0;color:var(--muted);font-size:.86rem}
+.showrow .desc{margin:6px 0 0;color:#c9c4d6;font-size:.92rem}
+.go{color:var(--muted);font-size:1.2rem}
+.cover{display:block;object-fit:cover;border-radius:14px}
+.cover.gen{display:grid;place-items:center;color:#fff;font:700 1.05rem "Space Grotesk",sans-serif}
+.cover.sm{width:56px;height:56px;border-radius:16px;flex:none}
+.cover.xs{width:34px;height:34px;font-size:.75rem;border-radius:10px;flex:none}
+.cover.lg{width:min(240px,100%);aspect-ratio:1;font-size:4rem;border-radius:28px}
+.badges{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:4px}
+.badge{font-size:.66rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;padding:3px 8px;border-radius:999px}
+.feat{background:var(--lime);color:#14120a}
+.req{background:rgba(255,90,183,.16);color:#ffc2e3;border:1px solid rgba(255,90,183,.35)}
+.demo{background:rgba(255,255,255,.08);color:#c6c0d4}
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0 18px}
+.chip{padding:6px 12px;border:1px solid var(--line);border-radius:999px;background:rgba(255,255,255,.03);color:var(--ink);text-decoration:none;font-size:.84rem}
+.chip.on,.chip:hover{background:var(--lime);color:#14120a;border-color:var(--lime)}
+.tablewrap{overflow-x:auto;border:1px solid var(--line);border-radius:20px;background:var(--card)}
+table{width:100%;border-collapse:collapse}
+th,td{padding:14px 16px;text-align:left;border-bottom:1px solid var(--line)}
+tr:last-child td{border-bottom:0}
+th{font-size:.7rem;letter-spacing:.08em;text-transform:uppercase;color:#8a849b;font-weight:500}
+.num{text-align:right;font-weight:700}
+.rk{font-weight:700;color:var(--lime);font-variant-numeric:tabular-nums}
+.rowlink{display:inline-flex;gap:10px;align-items:center;font-weight:600;color:var(--ink);text-decoration:none}
+.show{display:grid;grid-template-columns:auto 1fr;gap:36px;align-items:start;padding-top:10px}
+.lead{font-size:1.15rem;color:#d4cfe0}
+.stats{display:flex;gap:10px;flex-wrap:wrap;margin:20px 0}
+.stats div{min-width:108px;padding:14px 16px;border:1px solid var(--line);border-radius:16px;background:var(--card)}
+.stats b{display:block;font-size:1.5rem;letter-spacing:-.03em}
+.stats span{font-size:.78rem;color:var(--muted)}
+.form{
+  display:grid;grid-template-columns:1fr 1fr;gap:16px;max-width:860px;
+  padding:26px;border:1px solid var(--line);border-radius:22px;background:var(--card);
+}
+.form label{display:flex;flex-direction:column;gap:6px;font-weight:600}
+.form .full{grid-column:1/-1}
+.form input,.form select,.form textarea{
+  font:inherit;padding:12px 13px;border:1px solid var(--line);border-radius:12px;
+  background:rgba(0,0,0,.28);color:var(--ink);
+}
+.form input:focus,.form select:focus,.form textarea:focus{outline:2px solid var(--lime);border-color:transparent}
+.form small{font-weight:400;color:var(--muted)}
+.check{flex-direction:row!important;align-items:flex-start;gap:12px;background:rgba(223,241,80,.08);border:1px solid rgba(223,241,80,.2);padding:14px;border-radius:14px}
+.check input{width:18px;height:18px;margin-top:3px;accent-color:var(--lime)}
+.alert{background:rgba(255,90,183,.12);border:1px solid rgba(255,90,183,.3);color:#ffd0ea;padding:12px 18px;border-radius:14px;max-width:860px;margin-bottom:16px}
+.empty{color:var(--muted);padding:18px}
+.prose{max-width:700px}
+.prose p{color:#c9c4d6}
+footer{position:relative;z-index:1;border-top:1px solid var(--line);padding:28px 5vw 48px;font-size:.9rem;color:var(--muted)}
+footer b{color:var(--ink)}
+.legal{font-size:.8rem;max-width:860px}
+@media(max-width:860px){
+  .featgrid,.show,.form,.statline{grid-template-columns:1fr}
+  nav{order:3;flex-basis:100%;justify-content:flex-start;gap:14px}
+  .cta-top{margin-left:0}
+  .cover.lg{width:100%}
+}
+
+/* RSS import and listening — original components for the directory. */
+.rss-import>label{margin-bottom:8px}
+.rss-controls{display:flex;gap:12px;align-items:stretch}
+.rss-controls input{flex:1;min-width:0}
+.fill-feed{flex:none;border-radius:12px;white-space:nowrap}
+.fill-feed:disabled{opacity:.55;cursor:wait;transform:none}
+.feed-status{font-size:.8rem;color:var(--muted);margin:9px 0 0;font-weight:400}
+.feed-status.success{color:var(--lime)}
+.feed-status.error{color:#ffb5d9}
+.feed-preview{padding:20px;border:1px solid rgba(223,241,80,.24);border-radius:18px;background:linear-gradient(120deg,rgba(223,241,80,.045),rgba(139,111,255,.07))}
+.feed-preview[hidden]{display:none}
+.feed-preview-head{display:flex;align-items:center;gap:16px}
+.feed-cover{width:76px;height:76px;object-fit:cover;border-radius:14px;flex:none}
+.feed-preview-head h2{font-size:1.45rem;line-height:1.15}
+.feed-preview-head .muted{font-size:.78rem;margin:6px 0 0}
+.episode-panel{min-width:0;margin:24px 0;padding:22px;border:1px solid rgba(139,111,255,.32);border-radius:20px;background:linear-gradient(135deg,rgba(139,111,255,.12),rgba(255,255,255,.025));box-shadow:0 10px 35px rgba(0,0,0,.12)}
+.episode-panel .eyebrow{color:var(--lime);margin-bottom:10px}
+.episode-panel h2{font-family:"Instrument Serif",Georgia,serif;font-size:1.8rem;font-weight:400;line-height:1.12;letter-spacing:-.015em}
+.episode-meta{font-size:.74rem;color:var(--muted);margin:10px 0}
+.episode-description{font-size:.86rem;line-height:1.6;color:#c9c4d6;margin:10px 0 16px}
+.episode-panel audio{display:block;width:100%;height:44px;border-radius:999px;accent-color:var(--lime);color-scheme:dark}
+.feed-preview .episode-panel{padding:16px;margin:16px 0 0;border-radius:14px}
+.feed-preview .episode-panel h2{font-size:1.5rem}
+.feed-preview .episode-description{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.feed-note{padding:14px 18px;margin:20px 0;border:1px dashed var(--line);border-radius:14px;color:var(--muted);font-size:.85rem}
+.show>div{min-width:0}
+@media(max-width:600px){.rss-controls{flex-direction:column}.feed-preview{padding:14px}.episode-panel{padding:18px}.feed-preview-head{align-items:flex-start}.feed-cover{width:60px;height:60px}}
+/* Keep remote artwork's intrinsic size from widening the show grid. */
+@media(min-width:861px){.show{grid-template-columns:240px minmax(0,1fr)}}
+.show>.cover{width:100%;max-width:240px}
+
+/* Three honest chart lenses, with the same editorial directory language. */
+.chart-views{display:inline-flex;flex:none;justify-content:flex-start;gap:6px;padding:5px;margin:10px 0 8px;border:1px solid var(--line);border-radius:999px;background:rgba(255,255,255,.025)}
+.chart-views .chip{padding:9px 23px;border-color:transparent;font-weight:600;text-align:center}
+.chart-views .chip:not(.on){background:transparent;color:var(--muted)}
+.chart-views .chip:hover{color:#14120a;background:var(--lime)}
+.chart-category{margin-top:14px;color:var(--lime)}
+.chart-note{font-size:.78rem;color:var(--muted);margin:16px 0}
+.listed-date{font-size:.8rem;font-weight:500;white-space:nowrap;color:#c9c4d6}
+.home-rising{margin:30px 0 38px}
+.home-rising .sec-h{margin-bottom:14px}
+.compact-rising{gap:6px}
+.compact-rising .showrow{grid-template-columns:36px minmax(0,1fr) auto;padding:6px 16px;gap:14px;border-radius:14px}
+.compact-rising .cover.sm{width:36px;height:36px;border-radius:10px;font-size:.8rem}
+.compact-rising .badges,.compact-rising .desc{display:none}
+.compact-rising .showrow-body h3{font-size:.95rem;margin:0 0 2px}
+.compact-rising .showrow .meta{font-size:.75rem}
+.compact-rising .go{color:var(--lime)}
+@media(max-width:600px){.chart-views{width:100%}.chart-views .chip{flex:1;padding:9px 12px}.home-rising .sec-h a{font-size:.85rem}}
