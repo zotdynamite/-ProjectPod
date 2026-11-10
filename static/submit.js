@@ -43,8 +43,30 @@
       panel.append(node('p', 'eyebrow', 'Latest episode'), node('h2', '', latest.title || 'Latest episode'),
         node('p', 'episode-meta', [publication(latest.published), duration(latest.duration)].filter(Boolean).join(' · ')),
         node('p', 'episode-description', latest.description));
-      const audio = node('audio'); audio.controls = true; audio.preload = 'metadata'; audio.src = safeUrl(latest.audio);
-      panel.append(audio); preview.append(panel);
+      const player = node('div', 'player');
+      player.dataset.sting = '/static/podcast_stream_audio_logo.mp3';
+      player.dataset.audio = safeUrl(latest.audio);
+      player.dataset.title = latest.title || 'Latest episode';
+      const play = node('button', 'play'); play.type = 'button';
+      play.setAttribute('aria-label', 'Play ' + player.dataset.title);
+      play.append(node('span', 'play-icon'));
+      const copy = node('div', 'player-copy');
+      copy.append(node('strong', 'player-title', player.dataset.title), node('span', 'player-time', '0:00 / –:–'));
+      const wave = node('div', 'wave');
+      wave.tabIndex = 0; wave.setAttribute('role', 'slider'); wave.setAttribute('aria-label', 'Playback progress');
+      wave.setAttribute('aria-valuemin', '0'); wave.setAttribute('aria-valuemax', '100'); wave.setAttribute('aria-valuenow', '0');
+      let seed = player.dataset.audio.length, bars = '';
+      for (let i = 0; i < 48; i++) {
+        seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
+        bars += `<i style="height:${22 + (seed + i * 17) % 78}%"></i>`;
+      }
+      const dim = node('div', 'bars bars-dim'); dim.innerHTML = bars;
+      const hot = node('div', 'bars bars-hot'); hot.innerHTML = bars;
+      wave.append(dim, hot, node('span', 'scrub'));
+      const live = node('p', 'player-live sr'); live.setAttribute('aria-live', 'polite');
+      const hint = node('p', 'player-hint', 'First play starts with a short intro, then the episode.');
+      player.append(play, copy, wave, live);
+      panel.append(player, hint); preview.append(panel);
     }
     preview.hidden = false;
   }

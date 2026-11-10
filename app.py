@@ -79,11 +79,13 @@ def ranked(category=None):
 
 e = lambda s: html.escape(str(s or ""), quote=True)
 
-def cover(s, size=""):
+def cover(s, size="", lazy=True):
+    lazy_attr = ' loading="lazy"' if lazy else ""
     if s.get("cover"):
-        return f'<img class="cover {size}" src="{e(s["cover"])}" alt="Cover art for {e(s["name"])}" loading="lazy">'
+        return f'<img class="cover {size}" src="{e(s["cover"])}" alt="Cover art for {e(s["name"])}"{lazy_attr}>'
     a,b = PALETTES[s["id"] % len(PALETTES)]
-    ini = "".join(w[0] for w in s["name"].split()[:2]).upper()
+    words = re.findall(r"[A-Za-z0-9]+", s["name"])
+    ini = "".join(w[0] for w in words[:2]).upper() or "?"
     return f'<div class="cover gen {size}" style="background:linear-gradient(135deg,{a},{b})" role="img" aria-label="Generated cover for {e(s["name"])}"><span>{e(ini)}</span></div>'
 
 def badges(s):
@@ -93,74 +95,197 @@ def badges(s):
     if s["demo"]: out += '<span class="badge demo">Demo</span>'
     return out
 
+def wave_bars(seed, n=48):
+    x = (int(seed or 1) * 17 + 3) & 0x7fffffff
+    parts = []
+    for i in range(n):
+        x = (x * 1103515245 + 12345) & 0x7fffffff
+        height = 22 + (x + i * 17) % 78
+        parts.append(f'<i style="height:{height}%"></i>')
+    return "".join(parts)
+
+def wave_svg(seed, n, cls):
+    x = int(seed) * 13 + 5
+    rects = []
+    for i in range(n):
+        x = (x * 1103515245 + 12345) & 0x7fffffff
+        height = 10 + (x % 80)
+        y = (100 - height) / 2
+        rects.append(f'<rect x="{i * 6}" y="{y:.1f}" width="3" height="{height}" rx="1.5"/>')
+    return f'<svg class="{cls}" viewBox="0 0 {n * 6} 100" preserveAspectRatio="none" aria-hidden="true">{"".join(rects)}</svg>'
+
+def stable_seed(text):
+    n = 0
+    for ch in str(text or ""):
+        n = (n * 33 + ord(ch)) & 0x7fffffff
+    return n or 1
+
+def player_box(title, audio, seed, note=""):
+    bars = wave_bars(seed or 1)
+    if not audio:
+        message = note or "No playable episode found in this feed yet."
+        return f'''<div class="player is-empty"><button class="play" type="button" disabled aria-label="No audio available"><span class="play-icon" aria-hidden="true"></span></button><div class="player-copy"><strong>{e(message)}</strong></div><div class="wave" aria-hidden="true"><div class="bars bars-dim">{bars}</div></div></div>'''
+    return f'''<div class="player" data-sting="/static/podcast_stream_audio_logo.mp3" data-audio="{e(audio)}" data-title="{e(title)}"><button class="play" type="button" aria-label="Play {e(title)}"><span class="play-icon" aria-hidden="true"></span></button><div class="player-copy"><strong class="player-title">{e(title)}</strong><span class="player-time">0:00 / –:–</span></div><div class="wave" role="slider" tabindex="0" aria-label="Playback progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="bars bars-dim">{bars}</div><div class="bars bars-hot">{bars}</div><span class="scrub"></span></div><p class="player-live sr" aria-live="polite"></p></div><p class="player-hint">First play starts with a short intro, then the episode.</p>'''
+
+def cta_band():
+    return f'''<section class="cta-band">{wave_svg(4, 36, "cta-wave")}<div class="cta-copy"><h2>Got a show? <span>Put it on the chart.</span></h2><a class="btn" href="/submit">Submit your show</a></div>{wave_svg(9, 36, "cta-wave")}</section>'''
+
+def weekly_map():
+    with db() as c:
+        return {r["show_id"]: r["n"] for r in c.execute(
+            "SELECT show_id, COUNT(*) AS n FROM boosts WHERE created >= datetime('now','-7 days') GROUP BY show_id")}
+
+def boost_series(show_id):
+    from datetime import datetime, timedelta
+    with db() as c:
+        rows = c.execute("""SELECT date(created) AS day, COUNT(*) AS n FROM boosts
+            WHERE show_id=? AND created >= datetime('now','-7 days') GROUP BY day""", (show_id,)).fetchall()
+        start, today = c.execute("SELECT date('now','-6 days'), date('now')").fetchone()
+    counts = {r["day"]: r["n"] for r in rows}
+    first = datetime.fromisoformat(start).date()
+    last = datetime.fromisoformat(today).date()
+    earlier = [datetime.fromisoformat(day).date() for day in counts if day < start]
+    if earlier:
+        first = min([first] + earlier)
+    series, day = [], first
+    while day <= last:
+        series.append((day.isoformat(), counts.get(day.isoformat(), 0)))
+        day += timedelta(days=1)
+    return series
+
+def history_chart(series):
+    total = sum(n for _, n in series)
+    if not series or total == 0:
+        return '<p class="chart-empty">No boosts in the last 7 days.</p>'
+    running, cum = 0, []
+    for day, n in series:
+        running += n
+        cum.append((day, running))
+    width, height = 320, 150
+    left, right, top, bottom = 30, 12, 16, 24
+    peak = max(v for _, v in cum) or 1
+    count = len(cum)
+    inner_w, inner_h = width - left - right, height - top - bottom
+    def point(i, value):
+        x = left if count == 1 else left + inner_w * i / (count - 1)
+        y = top + inner_h * (1 - value / peak)
+        return x, y
+    pts = [point(i, value) for i, (_, value) in enumerate(cum)]
+    ymin, ymax = top, height - bottom
+    def smooth(points):
+        if len(points) == 1:
+            return f"M{points[0][0]:.1f},{points[0][1]:.1f}"
+        d = f"M{points[0][0]:.1f},{points[0][1]:.1f}"
+        for i in range(len(points) - 1):
+            p0 = points[i - 1] if i else points[i]
+            p1, p2 = points[i], points[i + 1]
+            p3 = points[i + 2] if i + 2 < len(points) else p2
+            c1y = min(ymax, max(ymin, p1[1] + (p2[1] - p0[1]) / 6))
+            c2y = min(ymax, max(ymin, p2[1] - (p3[1] - p1[1]) / 6))
+            d += f" C{p1[0] + (p2[0] - p0[0]) / 6:.1f},{c1y:.1f} {p2[0] - (p3[0] - p1[0]) / 6:.1f},{c2y:.1f} {p2[0]:.1f},{p2[1]:.1f}"
+        return d
+    line = smooth(pts)
+    area = line + f" L{pts[-1][0]:.1f},{ymax:.1f} L{pts[0][0]:.1f},{ymax:.1f} Z"
+    months = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split()
+    def xlabel(iso, last):
+        if last: return "Today"
+        _year, month, day = (int(part) for part in iso.split("-"))
+        return f"{day} {months[month - 1]}"
+    indexes = set(range(0, count, max(1, (count - 1) // 3)))
+    indexes.add(count - 1)
+    labels = "".join(
+        f'<text x="{pts[i][0]:.1f}" y="{height - 6}" text-anchor="middle">{e(xlabel(cum[i][0], i == count - 1))}</text>'
+        for i in sorted(indexes))
+    end_x, end_y = pts[-1]
+    anchor, label_x = ("end", end_x - 8) if end_x > left + 36 else ("start", end_x + 8)
+    return f'''<svg class="chart" viewBox="0 0 {width} {height}" role="img" aria-label="Cumulative boosts over the last 7 days, ending at {cum[-1][1]}"><defs><linearGradient id="boostfill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#b8d818" stop-opacity=".55"/><stop offset="1" stop-color="#b8d818" stop-opacity="0"/></linearGradient></defs><line class="grid" x1="{left}" y1="{top}" x2="{width - right}" y2="{top}"/><line class="grid" x1="{left}" y1="{ymax}" x2="{width - right}" y2="{ymax}"/><path class="chart-area" fill="url(#boostfill)" d="{area}"/><path class="chart-line" d="{line}"/><circle class="chart-dot" cx="{end_x:.1f}" cy="{end_y:.1f}" r="4"/><text class="chart-end" x="{label_x:.1f}" y="{max(top + 4, end_y - 8):.1f}" text-anchor="{anchor}">{cum[-1][1]}</text><text x="2" y="{top + 8}">{peak}</text><text x="2" y="{ymax}">0</text>{labels}</svg><p class="chart-caption">Cumulative boosts · last 7 days</p>'''
+
 def card(s, view="overall"):
-    metric = f'{s["weekly_boosts"]} boosts this week' if view == "rising" else f'{s["popularity"]} pts'
-    return f'''<a class="showrow" href="/show/{s["id"]}">{cover(s,"sm")}<div class="showrow-body">
-<div class="badges">{badges(s)}</div><h3>{e(s["name"])}</h3>
-<p class="meta">#{s["rank"]} · {e(s["category"])} · {metric}</p>
-<p class="desc">{e(s["description"][:140])}</p></div><span class="go" aria-hidden="true">&rarr;</span></a>'''
+    if view == "rising": metric = f'{s["weekly_boosts"]} boosts this week'
+    elif view == "new": metric = listed_date(s["created"])
+    else: metric = f'{s["popularity"]} pts'
+    return f'''<a class="showrow" href="/show/{s["id"]}">{cover(s,"sm")}<div class="showrow-body"><div class="badges">{badges(s)}</div><strong class="showrow-name">{e(s["name"])}</strong><p class="meta"><span class="pill">{e(s["category"])}</span><span>#{s["rank"]} · {e(metric)}</span></p><p class="desc">{e((s["description"] or "")[:140])}</p></div><span class="go" aria-hidden="true">&rsaquo;</span></a>'''
 
-def page(title, body, active=""):
-    nav = "".join(f'<a href="{h}" class="{"on" if active==k else ""}">{k}</a>' for k,h in
-                  [("Home","/"),("Browse","/browse"),("Charts","/charts"),("About","/about")])
+def page(title, body, active="", scripts="", cta=True, q=""):
+    links = "".join(f'<a href="{href}" class="{"on" if active==key else ""}">{label}</a>'
+                    for label, href, key in (("Discover","/","Discover"),("Charts","/charts","Charts"),("Categories","/browse","Categories")))
+    band = f'<div class="wrap">{cta_band()}</div>' if cta else ""
     return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{e(title)} · Podcast Stream</title><link rel="stylesheet" href="/static/style.css">
-<link rel="icon" href="/static/logo.svg"></head><body>
-<div class="aura" aria-hidden="true"></div>
-<div class="preview">First preview · demo listings are fictional</div>
-<header class="top"><a class="brand" href="/"><img src="/static/logo.svg" alt="" width="36" height="36"><span>Podcast<b>Stream</b></span></a>
-<nav>{nav}</nav>
-<a class="btn cta-top" href="/submit">+ Submit a show</a></header>
-<main>{body}</main>
-<footer><p><b>Podcast Stream</b> helps people discover podcasts by category, rank, and popularity, and lets creators post and promote their channels.</p>
-<p class="legal">Listings are user-submitted and not verified or endorsed by Podcast Stream. Featured and promoted spots are always labeled and never change chart rank. No payments are processed in this preview. Show names and artwork belong to their owners.</p></footer></body></html>'''
+<meta name="theme-color" content="#07090e"><title>{e(title)} · Podcast Stream</title><link rel="stylesheet" href="/static/style.css"><link rel="icon" href="/static/logo.svg"></head><body>
+<p class="preview">First preview · demo listings are fictional</p>
+<header class="top"><div class="wrap bar"><a class="brand" href="/"><span class="dot" aria-hidden="true"></span>Podcast Stream</a>
+<nav>{links}</nav>
+<form class="search" action="/" role="search"><label class="sr" for="q">Search shows</label><button type="submit" aria-label="Search"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M16 16l5 5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button><input id="q" name="q" value="{e(q)}" placeholder="Search"></form>
+<a class="btn" href="/submit">Submit your show</a></div></header>
+<main><div class="wrap">{body}</div></main>
+{band}
+<footer><div class="wrap"><div class="foot"><a class="brand" href="/"><span class="dot" aria-hidden="true"></span>Podcast Stream</a>
+<nav><a href="/">Discover</a><a href="/charts">Charts</a><a href="/browse">Categories</a><a href="/submit">Submit your show</a><a href="/about">About</a><a href="#legal">Privacy</a><a href="#legal">Terms</a></nav>
+<p class="copy">© 2026 Podcast Stream</p></div>
+<p class="legal" id="legal">Listings are user-submitted and not verified or endorsed by Podcast Stream. Featured and promoted spots are always labeled and never change chart rank. No payments are processed in this preview. Show names and artwork belong to their owners.</p></div></footer>
+<script src="/static/show.js" defer></script>{scripts}</body></html>'''
 
-def chips(base, current):
+def chips(base, current, scroll=False):
     out = f'<a class="chip {"on" if not current else ""}" href="{base}">All</a>'
     for c in CATEGORIES:
         out += f'<a class="chip {"on" if c==current else ""}" href="{base}?category={urllib.parse.quote(c)}">{e(c)}</a>'
-    return f'<div class="chips">{out}</div>'
+    return f'<div class="chips{" scroll" if scroll else ""}" aria-label="Categories">{out}</div>'
 
-def home(q):
+def rankline(s):
+    return f'''<div class="rankrow"><a class="rankmain" href="/show/{s["id"]}"><span class="pos">{s["rank"]}</span>{cover(s,"xs")}<span class="nm">{e(s["name"])}</span><span class="pill">{e(s["category"])}</span><span class="pts">{s["popularity"]} pts</span></a><form method="post" action="/show/{s["id"]}/boost"><button class="up" type="submit" aria-label="Boost {e(s["name"])}">▲</button></form></div>'''
+
+def spot_card(s, view):
+    pill = listed_date(s["created"], with_zone=False) if view == "new" else f'{s.get("weekly_boosts") or 0} boosts this week'
+    return f'''<a class="rankcard" href="/show/{s["id"]}"><div class="rankcard-art">{cover(s)}</div><span class="ranknum">#{s["rank"]}</span><span class="scrim"></span><span class="rankcard-info"><strong>{e(s["name"])}</strong><em>{e(s["category"])}</em><span class="boostpill">{e(pill)}</span></span></a>'''
+
+def feature_strip(rows):
+    items = [r for r in rows if r["featured"] or r["promote_requested"]]
+    if not items: return ""
+    heading = "Featured" if any(r["featured"] for r in items) else "Promotion requested"
+    bits = []
+    for r in items:
+        badge = '<span class="badge req">Promotion requested</span>' if r["promote_requested"] and not r["featured"] else ""
+        bits.append(f'<a class="featitem" href="/show/{r["id"]}">{cover(r,"sm")}<span><strong>{e(r["name"])}</strong><small>{e(r["category"])}</small>{badge}</span></a>')
+    return f'''<section class="featuredstrip" aria-label="Featured shows"><div class="flag"><span class="star" aria-hidden="true">★</span><span><b>{heading}</b><small>Labeled spots. They never change rank.</small></span></div>{"".join(bits)}</section>'''
+
+def side_link(s, weeks):
+    n = weeks.get(s["id"], 0)
+    delta = f' · <span class="delta">+{n} boosts</span>' if n else ""
+    return f'''<a class="siderow" href="/show/{s["id"]}">{cover(s,"xs")}<span><strong>{e(s["name"])}</strong><small>{s["popularity"]} pts{delta}</small></span><span class="go" aria-hidden="true">&rsaquo;</span></a>'''
+
+def home(q, panel="rising"):
     rows = ranked()
     if q:
         ql = q.lower()
-        res = [r for r in rows if ql in r["name"].lower() or ql in r["description"].lower()]
-        body = f'<p class="eyebrow">Search</p><h1>Results for “{e(q)}”</h1><p class="muted">{len(res)} result(s)</p>' + searchbox(q)
+        res = [r for r in rows if ql in r["name"].lower() or ql in (r["description"] or "").lower() or ql in (r["category"] or "").lower()]
+        body = f'<p class="eyebrow">Search</p><h1>Results for “{e(q)}”</h1><p class="muted">{len(res)} result(s)</p>'
         body += f'<div class="rows">{"".join(card(r) for r in res)}</div>' if res else '<p class="empty">No shows match. Try another word or <a href="/browse">browse categories</a>.</p>'
-        return page("Search", body, "Home")
-    feat = [r for r in rows if r["featured"] or r["promote_requested"]]
-    feat_html = "".join(card(r) for r in feat) or '<p class="empty">No featured shows yet.</p>'
-    listed = "".join(card(r) for r in rows)
-    rising_html = "".join(card(r, "rising") for r in chart_rows(view="rising")[:5]) or '<p class="empty">No boosts this week yet. <a href="/browse">Find a show to boost</a>.</p>' 
-    return page("Discover podcasts", f'''<section class="hero">
-<span class="live"><span class="eq" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span> {len(rows)} shows · ranked by listener boosts</span>
-<h1>Discover podcasts by rank, category, and <em>popularity</em>.</h1>
-<p>Browse by category, follow honest charts, and post your own channel. Featured spots are labeled and never buy a higher rank.</p>
-<div class="hero-tools">{searchbox("")}
-<div class="statline">
-<div><b>{len(rows)}</b><span>Shows listed</span></div>
-<div><b>19</b><span>Categories</span></div>
-<div><b>{len(feat)}</b><span>Featured spots</span></div>
-<div><b>0</b><span>Rank for sale</span></div>
-</div></div></section>
-<section class="home-rising"><div class="sec-h"><div><p class="eyebrow">Fresh momentum · last 7 days</p><h2>Rising this week</h2></div><a href="/charts?view=rising">See Rising chart &rarr;</a></div>
-<div class="rows compact-rising">{rising_html}</div></section>
-<section><div class="sec-h"><div><p class="eyebrow">Featured &amp; promoted</p><h2>Labeled spots. They do not affect rank.</h2></div></div>
-<div class="featgrid">{feat_html}</div></section>
-<section><div class="sec-h"><div><p class="eyebrow">Top ranked</p><h2>Shows people are boosting.</h2></div><a href="/charts">See full chart &rarr;</a></div>
+        return page("Search", body, "Discover", q=q)
+    panel = panel if panel in ("rising", "new") else "rising"
+    spots = chart_rows(view=panel)[:5]
+    note = "Fresh momentum · last 7 days" if panel == "rising" else "Newest listings · just added"
+    cards = "".join(spot_card(r, panel) for r in spots) or '<p class="empty">Nothing in this view yet.</p>'
+    tabs = "".join(
+        f'<a class="{"on" if panel==key else ""}" href="{href}"{" aria-current=\"page\"" if panel==key else ""}>{label}</a>'
+        for key, label, href in (("rising","Rising","/"), ("new","New","/?panel=new")))
+    mid = (len(rows) + 1) // 2
+    body = f'''<section class="hero"><div class="hero-copy"><p class="eyebrow">{len(rows)} shows · ranked by listener boosts</p>
+<h1>Discover podcasts by rank, category, and popularity.</h1>
+<p class="lede">Browse by category, follow honest charts, and post your own channel. Featured spots are labeled and never buy a higher rank.</p>
+<div class="hero-actions"><a class="btn" href="/charts">Explore charts</a><a class="btn btn-line" href="/submit">Submit your show</a></div></div>
+{wave_svg(5, 78, "hero-wave")}</section>
 {chips("/browse", None)}
-<div class="rows">{listed}</div></section>''', "Home")
-
-def searchbox(q):
-    return f'<form class="search" action="/" role="search"><label for="q" class="sr">Search podcasts</label><input id="q" name="q" value="{e(q)}" placeholder="Search shows by name or topic…"><button class="btn">Search</button></form>'
+<section class="spotpanel" aria-label="Rising and new shows"><div class="spot-side"><nav class="spot-tabs" aria-label="Chart spotlight">{tabs}</nav><p class="spot-note">{e(note)}</p></div><div class="spot-cards">{cards}</div></section>
+{feature_strip(rows)}
+<section class="board" aria-label="Shows people are boosting"><div class="board-intro">{wave_svg(11, 28, "mini-wave")}<h2>Shows people are boosting</h2></div><div class="rankcol">{"".join(rankline(r) for r in rows[:mid])}</div><div class="rankcol">{"".join(rankline(r) for r in rows[mid:])}</div></section>'''
+    return page("Discover podcasts", body, "Discover", q=q)
 
 def browse(cat):
     cat = cat if cat in CATEGORIES else None
     rows = [r for r in ranked() if not cat or r["category"]==cat]
     rows.sort(key=lambda r: r["name"].lower())
     g = "".join(card(r) for r in rows) or '<p class="empty">No shows in this category yet — <a href="/submit">be the first</a>.</p>'
-    return page("Browse", f'<p class="eyebrow">Library</p><h1>Browse {e(cat) if cat else "all categories"}</h1>{chips("/browse",cat)}<div class="rows">{g}</div>', "Browse")
+    return page("Browse", f'<p class="eyebrow">Categories</p><h1>Browse {e(cat) if cat else "all categories"}</h1><p class="muted">Alphabetical within the category. Chart rank is shown on each show and never changes for a featured spot.</p>{chips("/browse",cat)}<div class="rows">{g}</div>', "Categories")
 
 def chart_rows(category=None, view="overall"):
     """Only listening activity or listing date determines rank, never promotion."""
@@ -188,13 +313,14 @@ def chart_url(view="overall", category=None):
     if category: params["category"] = category
     return "/charts" + ("?" + urllib.parse.urlencode(params) if params else "")
 
-def listed_date(value):
+def listed_date(value, with_zone=True):
     try:
         from datetime import datetime, timezone
         from zoneinfo import ZoneInfo
         stamp = datetime.fromisoformat(value)
         if stamp.tzinfo is None: stamp = stamp.replace(tzinfo=timezone.utc)
-        return stamp.astimezone(ZoneInfo("Asia/Kuala_Lumpur")).strftime("%d %b %Y") + " MYT"
+        text = stamp.astimezone(ZoneInfo("Asia/Kuala_Lumpur")).strftime("%d %b %Y")
+        return text + (" MYT" if with_zone else "")
     except (ValueError, TypeError): return "Date unavailable"
 
 def charts(cat, view="overall"):
@@ -233,16 +359,42 @@ def show(sid):
             save_episode(sid, meta)
             for key, value in zip(("latest_title", "latest_audio", "latest_published", "latest_duration", "latest_description", "episode_count"), episode_values(meta)): s[key] = value
     latest = {k: s.get("latest_" + k) for k in ("title", "audio", "published", "duration", "description")}
-    player = '<p class="feed-note">Demo listing — no live audio feed.</p>' if is_demo else (episode_panel(latest) or '<p class="feed-note">No playable episode found in this feed yet.</p>')
+    weeks = weekly_map()
+    if is_demo:
+        player = player_box("", "", s["id"], "Demo listing — no live audio feed.")
+        episode_extra = ""
+    elif latest.get("audio"):
+        player = player_box(latest.get("title") or "Latest episode", latest["audio"], s["id"])
+        details = episode_details(latest)
+        episode_extra = f'<p class="ep-meta">{e(details)}</p>' if details else ""
+    else:
+        player = player_box("", "", s["id"], "No playable episode found in this feed yet.")
+        episode_extra = ""
     catrank = [r["id"] for r in rows if r["category"]==s["category"]].index(sid)+1
-    listen = f'<a class="btn" href="{e(s["website"])}" target="_blank" rel="noopener nofollow">Listen / visit website</a>' if s["website"] else ""
-    return page(s["name"], f'''<article class="show">{cover(s,"lg")}<div><div class="badges">{badges(s)}</div><h1>{e(s["name"])}</h1>
-<p class="meta"><a href="/browse?category={urllib.parse.quote(s["category"])}">{e(s["category"])}</a> · by {e(s["creator"])}</p>
-<div class="stats"><div><b>#{s["rank"]}</b><span>Overall rank</span></div><div><b>#{catrank}</b><span>In {e(s["category"])}</span></div><div><b id="pop">{s["popularity"]}</b><span>Popularity</span></div></div>
-<p class="lead">{e(s["description"])}</p>{player}<div class="cta">{listen}
-<form method="post" action="/show/{sid}/boost"><button class="btn boost">▲ Boost popularity</button></form>
-<a class="btn ghost" href="{e(s["rss"])}" target="_blank" rel="noopener nofollow">RSS feed</a></div>
-{f'<p class="muted">Website: <a href="{e(s["website"])}" rel="nofollow">{e(s["website"])}</a></p>' if s["website"] else ""}</div></article>''')
+    episodes = f'<span><b>{int(s["episode_count"])}</b> episodes</span>' if s.get("episode_count") else ""
+    links = []
+    if s.get("website"): links.append(f'<a href="{e(s["website"])}" target="_blank" rel="noopener nofollow">Listen / visit website</a>')
+    if s.get("rss"): links.append(f'<a href="{e(s["rss"])}" target="_blank" rel="noopener nofollow">RSS feed</a>')
+    quiet = f'<p class="quietlinks">{"".join(links)}</p>' if links else ""
+    others = sorted((r for r in rows if r["category"]==s["category"] and r["id"]!=sid), key=lambda r: (-r["popularity"], r["id"]))
+    more_html = "".join(side_link(r, weeks) for r in others[:4]) or f'<p class="empty">No other shows in {e(s["category"])} yet.</p>'
+    rising = [r for r in chart_rows(view="rising") if r["id"]!=sid][:4]
+    rising_rows = "".join(side_link(r, weeks) for r in rising) or '<p class="empty">No boosts this week yet.</p>'
+    return page(s["name"], f'''<div class="show-layout"><div class="show-main"><div class="show-hero">{cover(s,"lg",lazy=False)}<div class="show-info">
+<p class="crumb"><a href="/charts">Charts</a> <span aria-hidden="true">/</span> <a href="/browse?category={urllib.parse.quote(s["category"])}">{e(s["category"])}</a></p>
+<div class="badges">{badges(s)}</div>
+<p class="rankbig">#{s["rank"]}</p>
+<h1>{e(s["name"])}</h1>
+<p><a class="pill" href="/browse?category={urllib.parse.quote(s["category"])}">{e(s["category"])}</a></p>
+<p class="lead">{e(s["description"])}</p>
+<p class="byline">by {e(s["creator"])} · #{catrank} in {e(s["category"])}</p>
+<div class="statrow"><span><b>{s["popularity"]}</b> pts</span><span class="upstat"><b>+{weeks.get(sid, 0)}</b> boosts this week</span>{episodes}</div>
+<div class="actions"><form method="post" action="/show/{sid}/boost"><button class="btn" type="submit"><span aria-hidden="true">▲</span> Boost this show</button></form>
+<button class="btn ghost" type="button" id="share-show" data-title="{e(s["name"])}"><span class="share-label">Share</span></button></div>
+{quiet}</div></div>{player}{episode_extra}</div>
+<aside class="show-side"><section class="side-card"><h2>Chart history</h2>{history_chart(boost_series(sid))}</section>
+<section class="side-card"><h2>More in {e(s["category"])}</h2>{more_html}</section>
+<section class="side-card"><h2>Rising this week <span class="rise" aria-hidden="true">▲</span></h2>{rising_rows}</section></aside></div>''')
 
 def submit_form(v=None, errors=None, ok=None, preview=None, feed_error=False):
     v = v or {}; errors = errors or []
@@ -260,7 +412,7 @@ def submit_form(v=None, errors=None, ok=None, preview=None, feed_error=False):
 <label class="full">Short description *<textarea name="description" maxlength="400" required rows="3">{e(v.get("description"))}</textarea></label>
 {f("cover","Cover image URL","url",False,"https://…/cover.jpg")}{f("creator","Creator name")}{f("website","Website","url",False,"https://…")}
 <label class="check full"><input type="checkbox" name="promote" {"checked" if v.get("promote") else ""}> Request a featured / promote spot <small>(shown as “Promotion requested”; no payment in this preview; never changes rank)</small></label>
-<button class="btn full">Submit podcast</button></form><script src="/static/submit.js" defer></script>''', "Submit")
+<button class="btn full">Submit podcast</button></form>''', "Submit", '<script src="/static/submit.js" defer></script>', False)
 
 URL_RE = re.compile(r"^https?://[^\s/$.?#][^\s]*\.[^\s]+$", re.I)
 ITUNES = "{http://www.itunes.com/dtds/podcast-1.0.dtd}"
@@ -324,7 +476,7 @@ def episode_panel(latest):
 <p class="eyebrow">Latest episode</p><h2>{e(latest.get("title") or "Latest episode")}</h2>
 <p class="episode-meta">{e(episode_details(latest))}</p>
 <p class="episode-description">{e(latest.get("description"))}</p>
-<audio controls preload="metadata" src="{e(latest['audio'])}">Your browser does not support audio playback. <a href="{e(latest['audio'])}">Listen to the episode</a>.</audio></section>'''
+{player_box(latest.get("title") or "Latest episode", latest["audio"], stable_seed(latest.get("audio")))}</section>'''
 
 def episode_details(latest):
     # Publication times are normalized to Malaysia time, matching the preview client.
@@ -385,11 +537,17 @@ class H(BaseHTTPRequestHandler):
         u = urllib.parse.urlparse(self.path); qs = urllib.parse.parse_qs(u.query); g = lambda k: qs.get(k,[""])[0]
         p = u.path
         if p.startswith("/static/"):
-            fp = os.path.join(BASE,"static",os.path.basename(p))
-            if os.path.isfile(fp):
-                ct = {"css":"text/css","js":"application/javascript; charset=utf-8","svg":"image/svg+xml","png":"image/png"}.get(fp.rsplit(".",1)[-1],"application/octet-stream")
-                return self.send(open(fp,"rb").read(),ctype=ct)
-        elif p == "/": return self.send(home(g("q").strip()))
+            rel = urllib.parse.unquote(p[len("/static/"):]).lstrip("/")
+            root = os.path.realpath(os.path.join(BASE, "static"))
+            fp = os.path.realpath(os.path.join(root, rel))
+            if fp.startswith(root + os.sep) and os.path.isfile(fp):
+                ext = fp.rsplit(".", 1)[-1].lower()
+                ct = {"css":"text/css; charset=utf-8","js":"application/javascript; charset=utf-8","svg":"image/svg+xml",
+                      "png":"image/png","jpg":"image/jpeg","jpeg":"image/jpeg","webp":"image/webp",
+                      "mp3":"audio/mpeg","woff2":"font/woff2","woff":"font/woff"}.get(ext, "application/octet-stream")
+                return self.send(open(fp,"rb").read(), ctype=ct)
+            return self.send(page("Not found",'<h1>Not found</h1><p><a href="/">Back home</a></p>'), 404)
+        elif p == "/": return self.send(home(g("q").strip(), g("panel")))
         elif p == "/browse": return self.send(browse(g("category")))
         elif p == "/charts": return self.send(charts(g("category"), g("view")))
         elif p == "/submit": return self.send(submit_prefill(g("rss").strip()))
