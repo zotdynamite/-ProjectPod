@@ -276,7 +276,8 @@ main { padding: 8px 0 28px; }
 .scrim {
   position: absolute;
   inset: 0;
-  background: linear-gradient(180deg, rgba(0, 0, 0, .05) 10%, rgba(0, 0, 0, .82) 100%);
+  z-index: 1;
+  background: linear-gradient(180deg, rgba(0, 0, 0, .84) 0%, rgba(0, 0, 0, .62) 20%, rgba(0, 0, 0, .12) 42%, rgba(0, 0, 0, .28) 58%, rgba(0, 0, 0, .82) 80%, rgba(0, 0, 0, .94) 100%);
 }
 .ranknum {
   position: absolute;
@@ -336,12 +337,15 @@ main { padding: 8px 0 28px; }
 .featitem strong { display: block; font-size: .95rem; }
 .board {
   display: grid;
-  grid-template-columns: 190px minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: 220px minmax(0, 1fr) minmax(0, 1fr);
   gap: 18px 22px;
   align-items: start;
   margin-top: 28px;
 }
-.board-intro h2 { font-size: clamp(2.2rem, 3vw, 3rem); margin: 8px 0 0; max-width: 8ch; }
+.board-intro h2 { font-size: clamp(2rem, 2.3vw, 2.55rem); margin: 8px 0 0; max-width: 100%; line-height: .92; }
+@media (min-width: 1101px) {
+  .h-break { display: block; height: 0; overflow: hidden; }
+}
 .mini-wave { width: 120px; height: 36px; opacity: .9; display: block; }
 .rankcol { min-width: 0; }
 .rankrow {

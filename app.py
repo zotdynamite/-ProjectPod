@@ -277,7 +277,7 @@ def home(q, panel="rising"):
 {chips("/browse", None)}
 <section class="spotpanel" aria-label="Rising and new shows"><div class="spot-side"><nav class="spot-tabs" aria-label="Chart spotlight">{tabs}</nav><p class="spot-note">{e(note)}</p></div><div class="spot-cards">{cards}</div></section>
 {feature_strip(rows)}
-<section class="board" aria-label="Shows people are boosting"><div class="board-intro">{wave_svg(11, 28, "mini-wave")}<h2>Shows people are boosting</h2></div><div class="rankcol">{"".join(rankline(r) for r in rows[:mid])}</div><div class="rankcol">{"".join(rankline(r) for r in rows[mid:])}</div></section>'''
+<section class="board" aria-label="Shows people are boosting"><div class="board-intro">{wave_svg(11, 28, "mini-wave")}<h2>Shows people<span class="h-break"> </span>are boosting</h2></div><div class="rankcol">{"".join(rankline(r) for r in rows[:mid])}</div><div class="rankcol">{"".join(rankline(r) for r in rows[mid:])}</div></section>'''
     return page("Discover podcasts", body, "Discover", q=q)
 
 def browse(cat):
