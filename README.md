@@ -8,7 +8,9 @@ Requires only Python 3.8+ (standard library, no installs, no API keys):
     cd podcast-steam
     python3 app.py            # open http://localhost:8000  (PORT=9000 python3 app.py to change)
 
-Data persists in `podcast_steam.db` (SQLite, created and seeded with 12 fictional demo shows on first run). Delete the file to reset.
+Data persists in `podcast_steam.db` (SQLite). On startup the app deletes the old fictional demo shows (by title and `example.com` feed) and, once, inserts the 30 real podcasts in `catalog.json`. Shows a listener already submitted are kept, including their real boosts. Delete the file to reset to those 30 shows. The catalog starts at 0 popularity; a tie follows the Apple Podcasts US Top Shows chart from 13 November 2026, and shows that were not on that chart follow in alphabetical order.
+
+Render deploys this repo from `main` with start command `python app.py` (there is no `render.yaml`). That command runs the startup migration, so the next deploy updates a database that still contains the demo rows. The current service has no persistent disk; a fresh filesystem uses the committed database, and the same migration rewrites an older file if one is still present.
 
 ## Pages
 - `/` Home – pitch, search, Featured & promoted strip, Top ranked list, categories
