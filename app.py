@@ -8,20 +8,24 @@ DB = os.path.join(BASE, "podcast_steam.db")
 CATEGORIES = ["Arts","Business","Comedy","Education","Fiction","Government","Health & Fitness","History",
  "Kids & Family","Leisure","Music","News","Religion & Spirituality","Science","Society & Culture","Sports",
  "Technology","True Crime","TV & Film"]
-SEED = [  # fictional demo shows
- ("Midnight Ledger","Business","Small founders talk cash flow, pricing and the mistakes nobody posts about.",412,1),
- ("Orbit Kitchen","Science","Two astronomy nerds explain the universe while cooking dinner.",389,0),
- ("Pencil & Pixel","Arts","Weekly chats with illustrators about craft, tools and creative burnout.",256,0),
- ("The Quiet Verdict","True Crime","Calm, carefully sourced retellings of forgotten court cases.",498,0),
- ("Laugh Track Lost","Comedy","Improv comedians riff on a random headline every episode.",301,1),
- ("Byte-Sized Mornings","Technology","Ten-minute tech news briefings for your commute.",455,0),
- ("Little Lantern Stories","Kids & Family","Gentle bedtime stories with original characters.",222,0),
- ("Old Roads Radio","History","Travel through history one ancient trade route at a time.",187,0),
- ("Stride Club","Health & Fitness","Beginner-friendly running coaching and recovery tips.",164,0),
- ("Reel Talkers","TV & Film","Spoiler-free film club for the week's new releases.",278,0),
- ("Bassline Diaries","Music","Indie producers break down how one track was made.",143,0),
- ("Sideline Sundays","Sports","Grassroots sports stories from local leagues.",119,0),
-]
+with open(os.path.join(BASE, "catalog.json"), encoding="utf-8") as catalog_file:
+    CATALOG_FILE = json.load(catalog_file)
+CATALOG = CATALOG_FILE["shows"]
+# Titles shipped as the fictional first-run seed, plus the example.com feeds those rows used.
+DEMO_NAMES = (
+    "Midnight Ledger", "Orbit Kitchen", "Pencil & Pixel", "The Quiet Verdict",
+    "Laugh Track Lost", "Byte-Sized Mornings", "Little Lantern Stories",
+    "Old Roads Radio", "Stride Club", "Reel Talkers", "Bassline Diaries", "Sideline Sundays",
+)
+# Invented boost rows the preview inserted when the boosts table was empty.
+# Houston We Have a Podcast is a real submission that also received 7 of those rows.
+PREVIEW_BOOSTS = {
+    "Pencil & Pixel": 32, "Stride Club": 25, "Sideline Sundays": 19, "Orbit Kitchen": 12,
+    "Houston We Have a Podcast": 7, "Laugh Track Lost": 6, "Midnight Ledger": 5,
+    "Little Lantern Stories": 4, "Old Roads Radio": 3, "Reel Talkers": 3,
+    "Bassline Diaries": 2, "The Quiet Verdict": 2, "Byte-Sized Mornings": 1,
+}
+CATALOG_KEY = "apple-us-top-2026-11-13"
 PALETTES = [("#ff6b3d","#7b2ff7"),("#00c2a8","#1e3a8a"),("#f7b500","#d6246e"),("#3b82f6","#06b6d4"),
  ("#ef4444","#7c2d12"),("#10b981","#4338ca"),("#ec4899","#f59e0b"),("#8b5cf6","#0ea5e9")]
 
@@ -37,35 +41,66 @@ def init():
         columns = {r[1] for r in c.execute("PRAGMA table_info(shows)")}
         for name, kind in (("latest_title", "TEXT"), ("latest_audio", "TEXT"), ("latest_published", "TEXT"), ("latest_duration", "TEXT"), ("latest_description", "TEXT"), ("episode_count", "INTEGER")):
             if name not in columns: c.execute(f"ALTER TABLE shows ADD COLUMN {name} {kind}")
-        if not c.execute("SELECT COUNT(*) FROM shows").fetchone()[0]:
-            for n,cat,d,p,f in SEED:
-                slug = re.sub(r"[^a-z0-9]+","-",n.lower()).strip("-")
-                c.execute("INSERT INTO shows(name,rss,category,description,creator,website,popularity,featured,demo) VALUES(?,?,?,?,?,?,?,?,1)",
-                  (n,f"https://example.com/feeds/{slug}.xml",cat,d,"Demo Creator",f"https://example.com/{slug}",p,f))
         c.execute("""CREATE TABLE IF NOT EXISTS boosts (
             id INTEGER PRIMARY KEY, show_id INTEGER NOT NULL,
             created TEXT DEFAULT CURRENT_TIMESTAMP)""")
         c.execute("CREATE INDEX IF NOT EXISTS boosts_recent ON boosts(created, show_id)")
-        # Preview-only history: never rewrite the all-time popularity totals.
-        if not c.execute("SELECT COUNT(*) FROM boosts").fetchone()[0]:
-            weekly = {"Pencil & Pixel":32, "Stride Club":25, "Sideline Sundays":19,
-                      "Orbit Kitchen":12, "Houston We Have a Podcast":7,
-                      "Laugh Track Lost":6, "Midnight Ledger":5, "Little Lantern Stories":4,
-                      "Old Roads Radio":3, "Reel Talkers":3, "Bassline Diaries":2,
-                      "The Quiet Verdict":2, "Byte-Sized Mornings":1}
-            for row in c.execute("SELECT id,name FROM shows").fetchall():
-                for i in range(weekly.get(row["name"], 0)):
-                    hours = 1 + (i * 29 + row["id"] * 11) % 164
-                    c.execute("INSERT INTO boosts(show_id,created) VALUES(?,datetime('now',?))",
-                              (row["id"], f"-{hours} hours"))
-        # The original demos were inserted together. Stagger only that tied batch;
-        # real submission dates (including NASA) remain untouched on every restart.
-        demo_dates = c.execute("SELECT COUNT(*),COUNT(DISTINCT created) FROM shows WHERE demo=1").fetchone()
-        if demo_dates[0] > 1 and demo_dates[1] == 1:
-            demos = c.execute("SELECT id FROM shows WHERE demo=1 ORDER BY id").fetchall()
-            for i, row in enumerate(demos):
-                days = 7 + (len(demos) - i - 1) * 4
-                c.execute("UPDATE shows SET created=datetime('now',?) WHERE id=?", (f"-{days} days", row["id"]))
+        c.execute("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT)")
+        remove_demo_shows(c)
+        seed_catalog(c)
+
+def remove_demo_shows(c):
+    """Drop the fictional seed, wherever an older database file still has it."""
+    marks = ",".join("?" * len(DEMO_NAMES))
+    demo_ids = [row[0] for row in c.execute(
+        f"""SELECT id FROM shows WHERE demo=1 OR name IN ({marks})
+            OR lower(rss) LIKE 'https://example.com/%' OR lower(rss) LIKE 'http://example.com/%'""",
+        DEMO_NAMES)]
+    if not demo_ids:
+        return
+    id_marks = ",".join("?" * len(demo_ids))
+    clocks = [row[0] for row in c.execute(
+        f"SELECT strftime('%M:%S', created) FROM boosts WHERE show_id IN ({id_marks}) AND created IS NOT NULL",
+        demo_ids)]
+    if clocks:
+        from collections import Counter
+        clock, count = Counter(clocks).most_common(1)[0]
+        # The preview wrote every invented boost at one clock time. Real boosts on a
+        # kept show do not share that minute:second. Cap the delete at the seeded count
+        # and remove the oldest rows so a later real boost is the one that stays.
+        if count >= 3:
+            for name, seeded in PREVIEW_BOOSTS.items():
+                c.execute(
+                    """DELETE FROM boosts WHERE id IN (
+                        SELECT b.id FROM boosts b JOIN shows s ON s.id=b.show_id
+                        WHERE s.name=? AND strftime('%M:%S', b.created)=?
+                        ORDER BY b.id LIMIT ?)""",
+                    (name, clock, seeded))
+    c.execute(f"DELETE FROM boosts WHERE show_id IN ({id_marks})", demo_ids)
+    c.execute(f"DELETE FROM shows WHERE id IN ({id_marks})", demo_ids)
+
+def seed_catalog(c):
+    """Insert the real catalog once. Listener-submitted shows are left in place."""
+    done = c.execute("SELECT value FROM meta WHERE key='catalog'").fetchone()
+    if done and done[0] == CATALOG_KEY:
+        return
+    have_rss = {row[0] for row in c.execute("SELECT rss FROM shows")}
+    have_names = {row[0].casefold() for row in c.execute("SELECT name FROM shows")}
+    ordered = sorted(CATALOG, key=lambda show: (show.get("chart_rank") is None, show.get("chart_rank") or 10**9, show["name"].casefold()))
+    for show in ordered:
+        if show["rss"] in have_rss or show["name"].casefold() in have_names:
+            continue
+        if show["category"] not in CATEGORIES:
+            continue
+        c.execute("""INSERT INTO shows(name,rss,category,description,cover,creator,website,popularity,promote_requested,featured,demo)
+                     VALUES(?,?,?,?,?,?,?,0,0,0,0)""",
+                  (show["name"], show["rss"], show["category"], show["description"], show["cover"], show["creator"], show["website"]))
+        have_rss.add(show["rss"])
+        have_names.add(show["name"].casefold())
+    wanted = {show["rss"] for show in CATALOG} | {show["name"].casefold() for show in CATALOG}
+    present = sum(1 for row in c.execute("SELECT name, rss FROM shows") if row[1] in wanted or row[0].casefold() in wanted)
+    if present >= len(CATALOG):
+        c.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('catalog',?)", (CATALOG_KEY,))
 
 def ranked(category=None):
     """Rank computed live from popularity (ties: older first). Promotion never affects rank."""
@@ -212,7 +247,6 @@ def page(title, body, active="", scripts="", cta=True, q=""):
     band = f'<div class="wrap">{cta_band()}</div>' if cta else ""
     return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="theme-color" content="#07090e"><title>{e(title)} · Podcast Stream</title><link rel="stylesheet" href="/static/style.css"><link rel="icon" href="/static/logo.svg"></head><body>
-<p class="preview">First preview · demo listings are fictional</p>
 <header class="top"><div class="wrap bar"><a class="brand" href="/"><span class="dot" aria-hidden="true"></span>Podcast Stream</a>
 <nav>{links}</nav>
 <form class="search" action="/" role="search"><label class="sr" for="q">Search shows</label><button type="submit" aria-label="Search"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M16 16l5 5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button><input id="q" name="q" value="{e(q)}" placeholder="Search"></form>
@@ -345,9 +379,8 @@ def charts(cat, view="overall"):
         tr += f'<tr><td class="rk">{row["cat_rank"] if cat else row["rank"]}</td><td><a href="/show/{row["id"]}" class="rowlink">{cover(row,"xs")}{e(row["name"])}</a> {badges(row)}</td><td>{e(row["category"])}</td><td class="num {"listed-date" if view=="new" else ""}">{e(str(score))}</td></tr>'
     table = f'<div class="tablewrap"><table><thead><tr><th>Rank</th><th>Show</th><th>Category</th><th class="num">{headings[view]}</th></tr></thead><tbody>{tr}</tbody></table></div>' if rows else (
         '<p class="empty">No boosts in this category in the last 7 days. <a href="/browse">Browse shows</a> or <a href="/submit">submit a podcast</a>.</p>' if view == "rising" else '<p class="empty">No shows in this category yet. <a href="/submit">Submit a podcast</a>.</p>')
-    note = '<p class="chart-note">Preview activity is illustrative. Featured and promoted spots never buy rank.</p>' if view == "rising" else ""
     category_label = f'<p class="eyebrow chart-category">{e(cat)}</p>' if cat else ""
-    return page("Charts", f'<p class="eyebrow">Charts</p><h1>{titles[view]}</h1><p class="muted">{descriptions[view]}</p>{switch}{category_label}{filters}{table}{note}', "Charts")
+    return page("Charts", f'<p class="eyebrow">Charts</p><h1>{titles[view]}</h1><p class="muted">{descriptions[view]}</p>{switch}{category_label}{filters}{table}', "Charts")
 
 def show(sid):
     rows = ranked(); s = next((r for r in rows if r["id"]==sid), None)
@@ -423,14 +456,25 @@ def valid_url(url):
 def plain_text(value, limit):
     return re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", value or ""))).strip()[:limit]
 
+def podcast_xml(data):
+    """Parse a podcast document. A feed larger than the read cap is closed at the last full episode."""
+    try:
+        return ET.fromstring(data), True
+    except ET.ParseError:
+        cut = data.rfind(b"</item>")
+        if cut == -1: raise
+        return ET.fromstring(data[:cut + len(b"</item>")] + b"</channel></rss>"), False
+
 def fetch_rss(url):
     if not valid_url(url): return {}
     try:
         req = urllib.request.Request(url, headers={"User-Agent":"PodcastStream/0.1"})
-        with urllib.request.urlopen(req, timeout=8) as r:
-            data = r.read(2_000_001)
-        if len(data) > 2_000_000: return {}
-        ch = ET.fromstring(data).find("channel")
+        with urllib.request.urlopen(req, timeout=20) as r:
+            data = r.read(20_000_001)
+        complete = len(data) < 20_000_001
+        if not complete: data = data[:20_000_000]
+        root, well_formed = podcast_xml(data)
+        ch = root.find("channel")
         if ch is None: return {}
         it = ch.find(ITUNES + "image")
         image = (it.get("href", "") if it is not None else "") or ch.findtext("image/url") or ""
@@ -459,7 +503,7 @@ def fetch_rss(url):
                 "description": plain_text(ch.findtext("description"), 400),
                 "cover": image.strip() if valid_url(image.strip()) else "",
                 "website": (ch.findtext("link") or "").strip(),
-                "creator": plain_text(creator, 80), "episode_count": len(items), "latest": latest}
+                "creator": plain_text(creator, 80), "episode_count": len(items) if complete and well_formed else None, "latest": latest}
     except Exception: return {}
 
 def episode_values(meta):
@@ -554,7 +598,7 @@ class H(BaseHTTPRequestHandler):
         elif p == "/api/preview-rss":
             meta = fetch_rss(g("url").strip())
             return self.send(json.dumps(dict(ok=True, **meta) if meta else {"ok":False,"error":"Could not read that feed."}), ctype="application/json; charset=utf-8")
-        elif p == "/about": return self.send(page("About",'<article class="prose"><h1>About Podcast Stream</h1><p>Podcast Stream helps people discover podcasts by category, rank, and popularity, and lets creators post and promote their channels.</p><h2>How ranking works</h2><p>Every show has a popularity score. Listeners raise it with the Boost button. Overall ranks by all-time popularity; Rising ranks by boosts in the last 7 days, so newer shows can climb without a large lifetime score. New lists shows by the date they were added, newest first. Charts are recalculated on every boost and every new listing.</p><h2>Featured &amp; promoted</h2><p>Creators can request a promoted spot. Promoted shows appear in a clearly labeled strip and never get a higher chart rank for it.</p><h2>Preview notice</h2><p>This is a first preview. Demo listings are fictional; listings are user-submitted and unverified.</p></article>',"About"))
+        elif p == "/about": return self.send(page("About", f'''<article class="prose"><h1>About Podcast Stream</h1><p>Podcast Stream helps people discover podcasts by category, rank, and popularity, and lets creators post and promote their channels.</p><h2>How ranking works</h2><p>Every show has a popularity score. Listeners raise it with the Boost button. Overall ranks by all-time popularity; Rising ranks by boosts in the last 7 days, so newer shows can climb without a large lifetime score. New lists shows by the date they were added, newest first. Charts are recalculated on every boost and every new listing.</p><p>The 30 shows in the opening catalog start at 0 popularity. No listener totals were invented for them. When scores tie, the earlier listing ranks higher. Those shows were inserted in the order of the <a href="{e(CATALOG_FILE["chart_url"])}">Apple Podcasts US Top Shows</a> chart updated {e(CATALOG_FILE["chart_updated"])}. Shows from the catalog that were not on that chart follow the charted shows, alphabetically, still at 0. A listener boost is the only thing that adds a point.</p><h2>Where the catalog comes from</h2><p>Titles, publishers, categories, RSS feeds, and Apple Podcasts links were read from the Apple iTunes Lookup API on 13 November 2026. Descriptions were read from each show's RSS feed. Cover art is that show's Apple artwork with the image size set to 1400×1400, after the image URL returned a real image. Listings visitors submit are kept and are not replaced by the catalog.</p><h2>Featured &amp; promoted</h2><p>Creators can request a promoted spot. Promoted shows appear in a clearly labeled strip and never get a higher chart rank for it.</p></article>''', "About"))
         elif p == "/api/shows": return self.send(json.dumps(ranked()),ctype="application/json")
         else:
             m = re.fullmatch(r"/show/(\d+)",p)
