@@ -30,7 +30,13 @@ class VisitTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self._old_db = app.DB
-        app.DB = os.path.join(self.tmp.name, "visits.db")
+        self._pg = bool((os.environ.get("DATABASE_URL") or "").strip())
+        if self._pg:
+            with app.db() as conn:
+                for table in ("page_views", "boosts", "shows", "meta"):
+                    conn.execute("DROP TABLE IF EXISTS " + table)
+        else:
+            app.DB = os.path.join(self.tmp.name, "visits.db")
         app._daily_salt["day"] = ""
         app._daily_salt["value"] = ""
         self._old_token = os.environ.pop("STATS_TOKEN", None)
@@ -63,17 +69,52 @@ class VisitTests(unittest.TestCase):
             conn.close()
 
     def rows(self):
+        sql = "SELECT path, viewed_at, referrer, visitor_hash FROM page_views ORDER BY id"
+        if self._pg:
+            with app.db() as conn:
+                return [dict(row) for row in conn.execute(sql)]
         conn = sqlite3.connect(app.DB)
         conn.row_factory = sqlite3.Row
         try:
-            return [dict(row) for row in conn.execute(
-                "SELECT path, viewed_at, referrer, visitor_hash FROM page_views ORDER BY id")]
+            return [dict(row) for row in conn.execute(sql)]
         finally:
             conn.close()
 
     def db_bytes(self):
-        with open(app.DB, "rb") as handle:
-            return handle.read()
+        if not self._pg:
+            with open(app.DB, "rb") as handle:
+                return handle.read()
+        parts = []
+        with app.db() as conn:
+            for table in ("meta", "shows", "boosts", "page_views"):
+                for row in conn.execute("SELECT * FROM " + table):
+                    parts.append("\t".join("" if value is None else str(value) for value in row))
+        return "\n".join(parts).encode()
+
+    def page_view_columns(self):
+        if self._pg:
+            with app.db() as conn:
+                return [row[0] for row in conn.execute(
+                    """SELECT column_name FROM information_schema.columns
+                       WHERE table_schema = current_schema() AND table_name = 'page_views'
+                       ORDER BY ordinal_position""")]
+        return [col[1] for col in sqlite3.connect(app.DB).execute("PRAGMA table_info(page_views)")]
+
+    def sql(self, statement, params=(), one=False):
+        if self._pg:
+            with app.db() as conn:
+                cur = conn.execute(statement, params)
+                if not one:
+                    return None
+                row = cur.fetchone()
+                return tuple(row) if row is not None else None
+        conn = sqlite3.connect(app.DB)
+        try:
+            cur = conn.execute(statement, params)
+            conn.commit()
+            return cur.fetchone() if one else None
+        finally:
+            conn.close()
 
     def test_salt_rotates_and_hash_hides_the_ip(self):
         first = app.daily_salt("2026-01-01")
@@ -92,8 +133,7 @@ class VisitTests(unittest.TestCase):
         self.assertNotIn(first.encode(), raw)
         self.assertNotIn(second.encode(), raw)
         self.assertNotIn(ip.encode(), raw)
-        cols = sqlite3.connect(app.DB).execute("PRAGMA table_info(page_views)").fetchall()
-        self.assertEqual([col[1] for col in cols], ["id", "path", "viewed_at", "referrer", "visitor_hash"])
+        self.assertEqual(self.page_view_columns(), ["id", "path", "viewed_at", "referrer", "visitor_hash"])
         self.assertEqual(app.clean_referrer("https://news.example/story?utm=1#frag"), "https://news.example/story")
         self.assertEqual(app.clean_referrer("https://user:secret@news.example:8443/a?x=1"), "https://news.example:8443/a")
         self.assertEqual(app.clean_referrer("https://[2001:db8::5]/a?b=1"), "https://[2001:db8::5]/a")
@@ -186,15 +226,12 @@ class VisitTests(unittest.TestCase):
         now = datetime.now(timezone.utc)
         two_days = (now - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
         eight_days = (now - timedelta(days=8)).strftime("%Y-%m-%d %H:%M:%S")
-        conn = sqlite3.connect(app.DB)
-        conn.execute("INSERT INTO page_views(path, viewed_at, referrer, visitor_hash) VALUES(?,?,?,?)",
-                     ("/about", two_days, "https://old.example/post", "a" * 64))
-        conn.execute("INSERT INTO page_views(path, viewed_at, referrer, visitor_hash) VALUES(?,?,?,?)",
-                     ("/browse", now.strftime("%Y-%m-%d %H:%M:%S"), "", "c" * 64))
-        conn.execute("INSERT INTO page_views(path, viewed_at, referrer, visitor_hash) VALUES(?,?,?,?)",
-                     ("/submit", eight_days, "https://ancient.example/", "b" * 64))
-        conn.commit()
-        conn.close()
+        self.sql("INSERT INTO page_views(path, viewed_at, referrer, visitor_hash) VALUES(?,?,?,?)",
+                 ("/about", two_days, "https://old.example/post", "a" * 64))
+        self.sql("INSERT INTO page_views(path, viewed_at, referrer, visitor_hash) VALUES(?,?,?,?)",
+                 ("/browse", now.strftime("%Y-%m-%d %H:%M:%S"), "", "c" * 64))
+        self.sql("INSERT INTO page_views(path, viewed_at, referrer, visitor_hash) VALUES(?,?,?,?)",
+                 ("/submit", eight_days, "https://ancient.example/", "b" * 64))
 
         def bearer(token):
             return {"Authorization": f"Bearer {token}", "User-Agent": HUMAN}
@@ -287,9 +324,7 @@ class VisitTests(unittest.TestCase):
         self.assertEqual(self.rows(), [])
         self.assertNotIn(b"203.0.113.55", self.db_bytes())
 
-        conn = sqlite3.connect(app.DB)
-        sid, before = conn.execute("SELECT id, popularity FROM shows ORDER BY id LIMIT 1").fetchone()
-        conn.close()
+        sid, before = self.sql("SELECT id, popularity FROM shows ORDER BY id LIMIT 1", one=True)
         status, _, hdrs = self.request(
             "POST", f"/show/{sid}/boost",
             {"Content-Type": "application/x-www-form-urlencoded", "User-Agent": HUMAN,
@@ -298,10 +333,8 @@ class VisitTests(unittest.TestCase):
         self.assertEqual(status, 303)
         self.assertTrue(hdrs.get("location", "").endswith(f"/show/{sid}"))
         self.assertEqual(self.rows(), [])
-        conn = sqlite3.connect(app.DB)
-        after = conn.execute("SELECT popularity FROM shows WHERE id=?", (sid,)).fetchone()[0]
-        boosts = conn.execute("SELECT COUNT(*) FROM boosts WHERE show_id=?", (sid,)).fetchone()[0]
-        conn.close()
+        after = self.sql("SELECT popularity FROM shows WHERE id=?", (sid,), one=True)[0]
+        boosts = self.sql("SELECT COUNT(*) FROM boosts WHERE show_id=?", (sid,), one=True)[0]
         self.assertEqual(after, before + 1)
         self.assertEqual(boosts, 1)
         self.assertNotIn(b"203.0.113.55", self.db_bytes())

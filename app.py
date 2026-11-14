@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Podcast Stream v1 - zero-dependency podcast directory (Python stdlib only)."""
+"""Podcast Stream. SQLite by default; Postgres when DATABASE_URL is set."""
 import base64, hashlib, hmac, html, json, os, re, secrets, sqlite3, sys, threading, urllib.parse, urllib.request, xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import db as storage
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 DB = os.environ.get("PODCAST_DB") or os.path.join(BASE, "podcast_steam.db")
@@ -30,32 +32,114 @@ CATALOG_KEY = "apple-us-top-2026-11-13"
 PALETTES = [("#ff6b3d","#7b2ff7"),("#00c2a8","#1e3a8a"),("#f7b500","#d6246e"),("#3b82f6","#06b6d4"),
  ("#ef4444","#7c2d12"),("#10b981","#4338ca"),("#ec4899","#f59e0b"),("#8b5cf6","#0ea5e9")]
 
-def db():
-    c = sqlite3.connect(DB); c.row_factory = sqlite3.Row; return c
+# Same UTC text shape as SQLite's CURRENT_TIMESTAMP, so both backends share date queries.
+UTC_STAMP = "to_char((CURRENT_TIMESTAMP AT TIME ZONE 'UTC'), 'YYYY-MM-DD HH24:MI:SS')"
+SHOW_EXTRAS = (("latest_title", "TEXT"), ("latest_audio", "TEXT"), ("latest_published", "TEXT"), ("latest_duration", "TEXT"), ("latest_description", "TEXT"), ("episode_count", "INTEGER"))
+LISTENER_NAMES = ("Houston We Have a Podcast", "Python Bytes")
+LISTENER_COLUMNS = ("name", "rss", "category", "description", "cover", "creator", "website", "popularity",
+                    "promote_requested", "featured", "demo", "created", "latest_title", "latest_audio",
+                    "latest_published", "latest_duration", "latest_description", "episode_count")
+
+def db(timeout=5.0):
+    if storage.postgres_enabled():
+        return storage.connect()
+    c = sqlite3.connect(DB, timeout=timeout)
+    c.row_factory = sqlite3.Row
+    return c
 
 def init():
     with db() as c:
-        c.execute("""CREATE TABLE IF NOT EXISTS shows(id INTEGER PRIMARY KEY, name TEXT NOT NULL, rss TEXT NOT NULL,
-          category TEXT NOT NULL, description TEXT NOT NULL, cover TEXT, creator TEXT NOT NULL, website TEXT,
-          popularity INTEGER NOT NULL DEFAULT 0, promote_requested INTEGER DEFAULT 0, featured INTEGER DEFAULT 0,
-          demo INTEGER DEFAULT 0, created TEXT DEFAULT CURRENT_TIMESTAMP)""")
-        columns = {r[1] for r in c.execute("PRAGMA table_info(shows)")}
-        for name, kind in (("latest_title", "TEXT"), ("latest_audio", "TEXT"), ("latest_published", "TEXT"), ("latest_duration", "TEXT"), ("latest_description", "TEXT"), ("episode_count", "INTEGER")):
-            if name not in columns: c.execute(f"ALTER TABLE shows ADD COLUMN {name} {kind}")
-        c.execute("""CREATE TABLE IF NOT EXISTS boosts (
-            id INTEGER PRIMARY KEY, show_id INTEGER NOT NULL,
-            created TEXT DEFAULT CURRENT_TIMESTAMP)""")
-        c.execute("CREATE INDEX IF NOT EXISTS boosts_recent ON boosts(created, show_id)")
-        c.execute("""CREATE TABLE IF NOT EXISTS page_views (
-            id INTEGER PRIMARY KEY,
-            path TEXT NOT NULL,
-            viewed_at TEXT NOT NULL,
-            referrer TEXT NOT NULL DEFAULT '',
-            visitor_hash TEXT NOT NULL)""")
-        c.execute("CREATE INDEX IF NOT EXISTS page_views_recent ON page_views(viewed_at, path)")
-        c.execute("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT)")
+        if storage.postgres_enabled():
+            ensure_postgres(c)
+        else:
+            ensure_sqlite(c)
         remove_demo_shows(c)
         seed_catalog(c)
+        if storage.postgres_enabled():
+            seed_listener_submissions(c)
+
+def ensure_sqlite(c):
+    c.execute("""CREATE TABLE IF NOT EXISTS shows(id INTEGER PRIMARY KEY, name TEXT NOT NULL, rss TEXT NOT NULL,
+      category TEXT NOT NULL, description TEXT NOT NULL, cover TEXT, creator TEXT NOT NULL, website TEXT,
+      popularity INTEGER NOT NULL DEFAULT 0, promote_requested INTEGER DEFAULT 0, featured INTEGER DEFAULT 0,
+      demo INTEGER DEFAULT 0, created TEXT DEFAULT CURRENT_TIMESTAMP)""")
+    columns = {r[1] for r in c.execute("PRAGMA table_info(shows)")}
+    for name, kind in SHOW_EXTRAS:
+        if name not in columns: c.execute(f"ALTER TABLE shows ADD COLUMN {name} {kind}")
+    c.execute("""CREATE TABLE IF NOT EXISTS boosts (
+        id INTEGER PRIMARY KEY, show_id INTEGER NOT NULL,
+        created TEXT DEFAULT CURRENT_TIMESTAMP)""")
+    c.execute("CREATE INDEX IF NOT EXISTS boosts_recent ON boosts(created, show_id)")
+    c.execute("""CREATE TABLE IF NOT EXISTS page_views (
+        id INTEGER PRIMARY KEY,
+        path TEXT NOT NULL,
+        viewed_at TEXT NOT NULL,
+        referrer TEXT NOT NULL DEFAULT '',
+        visitor_hash TEXT NOT NULL)""")
+    c.execute("CREATE INDEX IF NOT EXISTS page_views_recent ON page_views(viewed_at, path)")
+    c.execute("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT)")
+
+def ensure_postgres(c):
+    c.execute(f"""CREATE TABLE IF NOT EXISTS shows(
+        id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+        name TEXT NOT NULL, rss TEXT NOT NULL, category TEXT NOT NULL, description TEXT NOT NULL,
+        cover TEXT, creator TEXT NOT NULL, website TEXT,
+        popularity INTEGER NOT NULL DEFAULT 0, promote_requested INTEGER DEFAULT 0, featured INTEGER DEFAULT 0,
+        demo INTEGER DEFAULT 0, created TEXT DEFAULT {UTC_STAMP},
+        latest_title TEXT, latest_audio TEXT, latest_published TEXT, latest_duration TEXT,
+        latest_description TEXT, episode_count INTEGER)""")
+    for name, kind in SHOW_EXTRAS:
+        c.execute(f"ALTER TABLE shows ADD COLUMN IF NOT EXISTS {name} {kind}")
+    c.execute(f"""CREATE TABLE IF NOT EXISTS boosts (
+        id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+        show_id INTEGER NOT NULL, created TEXT DEFAULT {UTC_STAMP})""")
+    c.execute("CREATE INDEX IF NOT EXISTS boosts_recent ON boosts(created, show_id)")
+    c.execute("""CREATE TABLE IF NOT EXISTS page_views (
+        id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+        path TEXT NOT NULL, viewed_at TEXT NOT NULL,
+        referrer TEXT NOT NULL DEFAULT '', visitor_hash TEXT NOT NULL)""")
+    c.execute("CREATE INDEX IF NOT EXISTS page_views_recent ON page_views(viewed_at, path)")
+    c.execute("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT)")
+
+def seed_listener_submissions(c):
+    """Copy the two real listener shows, and their boosts, out of the committed SQLite file once."""
+    done = c.execute("SELECT value FROM meta WHERE key='listener_seed'").fetchone()
+    if done:
+        return
+    path = os.path.join(BASE, "podcast_steam.db")
+    if not os.path.isfile(path):
+        return
+    src = sqlite3.connect(path)
+    src.row_factory = sqlite3.Row
+    src.execute("PRAGMA query_only = ON")
+    try:
+        marks = ",".join("?" * len(LISTENER_NAMES))
+        shows = list(src.execute(
+            f"SELECT * FROM shows WHERE name IN ({marks}) ORDER BY created, id", LISTENER_NAMES))
+        boost_rows = list(src.execute(
+            f"""SELECT b.show_id, b.created FROM boosts b JOIN shows s ON s.id=b.show_id
+                WHERE s.name IN ({marks}) ORDER BY b.id""", LISTENER_NAMES))
+    finally:
+        src.close()
+    boosts = {}
+    for row in boost_rows:
+        boosts.setdefault(row["show_id"], []).append(row["created"])
+    have_rss = {row[0] for row in c.execute("SELECT rss FROM shows")}
+    have_names = {row[0].casefold() for row in c.execute("SELECT name FROM shows")}
+    columns = ",".join(LISTENER_COLUMNS)
+    places = ",".join("?" * len(LISTENER_COLUMNS))
+    for show in shows:
+        if show["rss"] in have_rss or show["name"].casefold() in have_names:
+            continue
+        cur = c.execute(
+            f"INSERT INTO shows({columns}) VALUES({places})",
+            tuple(show[name] for name in LISTENER_COLUMNS))
+        for created in boosts.get(show["id"], []):
+            c.execute("INSERT INTO boosts(show_id, created) VALUES(?,?)", (cur.lastrowid, created))
+        have_rss.add(show["rss"])
+        have_names.add(show["name"].casefold())
+    c.execute("INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)",
+              ("listener_seed", "houston-we-have-a-podcast+python-bytes"))
 
 def remove_demo_shows(c):
     """Drop the fictional seed, wherever an older database file still has it."""
@@ -662,7 +746,7 @@ def record_page_view(handler):
         referrer = clean_referrer(headers.get("Referer", "") if headers else "")
         digest = visitor_hash(daily_salt(), ip, ua)
         viewed = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-        conn = sqlite3.connect(DB, timeout=0.5)
+        conn = db(timeout=0.5)
         try:
             conn.execute(
                 "INSERT INTO page_views(path, viewed_at, referrer, visitor_hash) VALUES(?,?,?,?)",
@@ -706,8 +790,7 @@ def visit_stats():
         views = conn.execute(f"SELECT COUNT(*) FROM page_views WHERE {where}").fetchone()[0]
         visitors = conn.execute(f"SELECT COUNT(DISTINCT visitor_hash) FROM page_views WHERE {where}").fetchone()[0]
         return {"views": views, "visitors": visitors}
-    conn = sqlite3.connect(DB, timeout=2)
-    conn.row_factory = sqlite3.Row
+    conn = db(timeout=2)
     try:
         week = "viewed_at >= datetime('now', '-7 days')"
         pages = [dict(row) for row in conn.execute(
@@ -717,7 +800,7 @@ def visit_stats():
             f"""SELECT referrer, COUNT(*) AS views, COUNT(DISTINCT visitor_hash) AS visitors
                 FROM page_views WHERE {week} AND referrer != ''
                 GROUP BY referrer ORDER BY views DESC, referrer ASC LIMIT 15""")]
-        return {
+        report = {
             "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "today": window(conn, "viewed_at >= date('now')"),
             "last_7_days": window(conn, week),
@@ -726,6 +809,8 @@ def visit_stats():
             "top_referrers": referrers,
             "uniques": "Distinct hashes for each UTC day. A visitor who returns on a later day counts again in the 7-day and all-time totals, because that day's salt has been discarded.",
         }
+        conn.commit()
+        return report
     finally:
         conn.close()
 
@@ -831,5 +916,6 @@ class H(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     init(); port = int(os.environ.get("PORT","8000"))
-    print(f"Podcast Stream running at http://localhost:{port}")
+    backend = "Postgres" if storage.postgres_enabled() else "SQLite"
+    print(f"Podcast Stream running at http://localhost:{port} ({backend})")
     ThreadingHTTPServer(("0.0.0.0",port),H).serve_forever()
