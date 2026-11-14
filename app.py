@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Podcast Stream v1 - zero-dependency podcast directory (Python stdlib only)."""
-import html, json, os, re, sqlite3, urllib.parse, urllib.request, xml.etree.ElementTree as ET
+import base64, hashlib, hmac, html, json, os, re, secrets, sqlite3, sys, threading, urllib.parse, urllib.request, xml.etree.ElementTree as ET
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-DB = os.path.join(BASE, "podcast_steam.db")
+DB = os.environ.get("PODCAST_DB") or os.path.join(BASE, "podcast_steam.db")
 CATEGORIES = ["Arts","Business","Comedy","Education","Fiction","Government","Health & Fitness","History",
  "Kids & Family","Leisure","Music","News","Religion & Spirituality","Science","Society & Culture","Sports",
  "Technology","True Crime","TV & Film"]
@@ -45,6 +46,13 @@ def init():
             id INTEGER PRIMARY KEY, show_id INTEGER NOT NULL,
             created TEXT DEFAULT CURRENT_TIMESTAMP)""")
         c.execute("CREATE INDEX IF NOT EXISTS boosts_recent ON boosts(created, show_id)")
+        c.execute("""CREATE TABLE IF NOT EXISTS page_views (
+            id INTEGER PRIMARY KEY,
+            path TEXT NOT NULL,
+            viewed_at TEXT NOT NULL,
+            referrer TEXT NOT NULL DEFAULT '',
+            visitor_hash TEXT NOT NULL)""")
+        c.execute("CREATE INDEX IF NOT EXISTS page_views_recent ON page_views(viewed_at, path)")
         c.execute("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT)")
         remove_demo_shows(c)
         seed_catalog(c)
@@ -572,11 +580,207 @@ def do_submit(v):
             (v["name"][:120],v["rss"],v["category"],v["description"][:400],v["cover"] or None,v["creator"][:80],v["website"] or None,1,1 if v["promote"] else 0) + episode_values(meta))
         return cur.lastrowid, None
 
+# Random salt for the current UTC day only. Replaced at midnight and never written
+# to SQLite, so yesterday's visitor hashes cannot be rebuilt from the database.
+_daily_salt = {"day": "", "value": ""}
+_salt_lock = threading.Lock()
+NOISE_UA = re.compile(
+    r"twitterbot|facebookexternalhit|googlebot|bingbot|slackbot|discordbot|linkedinbot"
+    r"|python-requests|curl|bot|crawler|spider|preview",
+    re.IGNORECASE)
+NOT_FOUND_PAGE = page("Not found", '<h1>Not found</h1><p><a href="/">Back home</a></p>')
+
+def daily_salt(today=None):
+    today = today or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    with _salt_lock:
+        if _daily_salt["day"] != today or not _daily_salt["value"]:
+            _daily_salt["day"] = today
+            _daily_salt["value"] = secrets.token_hex(16)
+        return _daily_salt["value"]
+
+def visitor_hash(salt, ip, user_agent):
+    material = f"{salt}{ip}{user_agent}".encode("utf-8", "surrogateescape")
+    return hashlib.sha256(material).hexdigest()
+
+def client_ip(headers, socket_host):
+    forwarded = ""
+    if headers is not None:
+        forwarded = headers.get("X-Forwarded-For", "") or ""
+    first = forwarded.split(",")[0].strip() if forwarded else ""
+    return first or (socket_host or "").strip()
+
+def clean_referrer(value):
+    """Keep the referrer URL with the query string and fragment removed."""
+    value = (value or "").strip()
+    if not value:
+        return ""
+    try:
+        parts = urllib.parse.urlsplit(value[:2000])
+    except ValueError:
+        return ""
+    if parts.scheme.lower() not in ("http", "https") or not parts.hostname:
+        return ""
+    host = parts.hostname
+    if ":" in host:
+        host = f"[{host}]"
+    if parts.port:
+        host = f"{host}:{parts.port}"
+    return urllib.parse.urlunsplit((parts.scheme.lower(), host, parts.path or "", "", ""))[:500]
+
+def request_path(raw):
+    path = urllib.parse.urlsplit(raw or "/").path or "/"
+    if not path.startswith("/"):
+        path = "/" + path
+    return path[:500]
+
+def is_noise(method, headers):
+    if (method or "").upper() in ("HEAD", "OPTIONS"):
+        return True
+    if headers is None:
+        return False
+    if headers.get("Render-Health-Check"):
+        return True
+    ua = headers.get("User-Agent", "") or ""
+    if ua.lower().startswith("render/"):
+        return True
+    return bool(NOISE_UA.search(ua))
+
+def record_page_view(handler):
+    """Log one HTML page view. Any failure is ignored so the page still loads."""
+    try:
+        if (handler.command or "").upper() != "GET":
+            return
+        path = request_path(handler.path)
+        if path.startswith("/static/") or path.startswith("/api/"):
+            return
+        headers = handler.headers
+        if is_noise(handler.command, headers):
+            return
+        socket_host = handler.client_address[0] if handler.client_address else ""
+        ip = client_ip(headers, socket_host)
+        ua = (headers.get("User-Agent", "") if headers else "") or ""
+        referrer = clean_referrer(headers.get("Referer", "") if headers else "")
+        digest = visitor_hash(daily_salt(), ip, ua)
+        viewed = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        conn = sqlite3.connect(DB, timeout=0.5)
+        try:
+            conn.execute(
+                "INSERT INTO page_views(path, viewed_at, referrer, visitor_hash) VALUES(?,?,?,?)",
+                (path, viewed, referrer, digest))
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        return
+
+def configured_stats_token():
+    return (os.environ.get("STATS_TOKEN") or "").strip()
+
+def presented_secret(headers):
+    """Token from Basic password or Bearer. Query strings are never read."""
+    if headers is None:
+        return ""
+    raw = headers.get("Authorization", "") or ""
+    scheme, _, rest = raw.partition(" ")
+    scheme, rest = scheme.lower(), rest.strip()
+    if scheme == "bearer":
+        return rest
+    if scheme != "basic" or not rest:
+        return ""
+    try:
+        decoded = base64.b64decode(rest, validate=True).decode("utf-8")
+    except (ValueError, UnicodeError):
+        return ""
+    _user, sep, password = decoded.partition(":")
+    return password if sep else ""
+
+def secrets_match(provided, expected):
+    if not provided or not expected:
+        return False
+    return hmac.compare_digest(
+        hashlib.sha256(provided.encode("utf-8")).digest(),
+        hashlib.sha256(expected.encode("utf-8")).digest())
+
+def visit_stats():
+    def window(conn, where):
+        views = conn.execute(f"SELECT COUNT(*) FROM page_views WHERE {where}").fetchone()[0]
+        visitors = conn.execute(f"SELECT COUNT(DISTINCT visitor_hash) FROM page_views WHERE {where}").fetchone()[0]
+        return {"views": views, "visitors": visitors}
+    conn = sqlite3.connect(DB, timeout=2)
+    conn.row_factory = sqlite3.Row
+    try:
+        week = "viewed_at >= datetime('now', '-7 days')"
+        pages = [dict(row) for row in conn.execute(
+            f"""SELECT path, COUNT(*) AS views, COUNT(DISTINCT visitor_hash) AS visitors
+                FROM page_views WHERE {week} GROUP BY path ORDER BY views DESC, path ASC LIMIT 15""")]
+        referrers = [dict(row) for row in conn.execute(
+            f"""SELECT referrer, COUNT(*) AS views, COUNT(DISTINCT visitor_hash) AS visitors
+                FROM page_views WHERE {week} AND referrer != ''
+                GROUP BY referrer ORDER BY views DESC, referrer ASC LIMIT 15""")]
+        return {
+            "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "today": window(conn, "viewed_at >= date('now')"),
+            "last_7_days": window(conn, week),
+            "all_time": window(conn, "1=1"),
+            "top_pages": pages,
+            "top_referrers": referrers,
+            "uniques": "Distinct hashes for each UTC day. A visitor who returns on a later day counts again in the 7-day and all-time totals, because that day's salt has been discarded.",
+        }
+    finally:
+        conn.close()
+
+def stats_page(report):
+    def card(label, block):
+        return f'''<article class="statcard"><span>{e(label)}</span><b>{int(block["views"])}</b><small>{int(block["visitors"])} unique</small></article>'''
+    def table(items, key, heading):
+        if not items:
+            return '<p class="empty">Nothing in the last 7 days.</p>'
+        body = "".join(
+            f'<tr><td>{e(item[key])}</td><td class="num">{int(item["views"])}</td><td class="num">{int(item["visitors"])}</td></tr>'
+            for item in items)
+        return f'<div class="tablewrap"><table><thead><tr><th>{e(heading)}</th><th class="num">Views</th><th class="num">Unique</th></tr></thead><tbody>{body}</tbody></table></div>'
+    body = f'''<p class="eyebrow">Stats</p><h1>Visitors</h1>
+<p class="muted">HTML pages only. Static files, API calls, bots, and Render health checks are skipped. Unique visitors are daily hashes, so a return visit on another UTC day counts again in the 7-day and all-time totals.</p>
+<div class="stats-grid">{card("Today (UTC)", report["today"])}{card("Last 7 days", report["last_7_days"])}{card("All time", report["all_time"])}</div>
+<div class="stats-split"><section><h2>Top pages</h2><p class="muted">Last 7 days</p>{table(report["top_pages"], "path", "Page")}</section>
+<section><h2>Top referrers</h2><p class="muted">Last 7 days, query strings removed</p>{table(report["top_referrers"], "referrer", "Referrer")}</section></div>'''
+    return page("Stats", body, "", "", False)
+
 class H(BaseHTTPRequestHandler):
-    def send(self, body, code=200, ctype="text/html; charset=utf-8"):
-        b = body.encode() if isinstance(body,str) else body
-        self.send_response(code); self.send_header("Content-Type",ctype); self.send_header("Content-Length",len(b)); self.end_headers(); self.wfile.write(b)
+    def send(self, body, code=200, ctype="text/html; charset=utf-8", extra=None, log_visit=None):
+        if log_visit is None:
+            log_visit = self.command == "GET" and ctype.startswith("text/html")
+        if log_visit:
+            record_page_view(self)
+        b = body.encode() if isinstance(body, str) else body
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(b)))
+        for key, value in (extra or {}).items():
+            self.send_header(key, value)
+        self.end_headers()
+        self.wfile.write(b)
     def redirect(self, to): self.send_response(303); self.send_header("Location",to); self.end_headers()
+    def log_message(self, fmt, *args):
+        # Path only. The request line can carry a query string, and the socket address is an IP.
+        raw = getattr(self, "path", "") or "/"
+        path = urllib.parse.urlsplit(raw).path or "/"
+        sys.stderr.write("%s %s %s\n" % (self.log_date_time_string(), getattr(self, "command", "-"), path))
+    def serve_stats(self, path):
+        expected = configured_stats_token()
+        private = {"Cache-Control": "no-store", "X-Robots-Tag": "noindex"}
+        if not expected:
+            self.send(NOT_FOUND_PAGE, 404, extra=private)
+            return
+        if not secrets_match(presented_secret(self.headers), expected):
+            self.send("Unauthorized", 401, "text/plain; charset=utf-8",
+                      {**private, "WWW-Authenticate": 'Basic realm="Podcast Stream stats"'})
+            return
+        report = visit_stats()
+        if path == "/api/stats":
+            self.send(json.dumps(report), ctype="application/json; charset=utf-8", extra=private)
+        else:
+            self.send(stats_page(report), extra=private)
     def do_GET(self):
         u = urllib.parse.urlparse(self.path); qs = urllib.parse.parse_qs(u.query); g = lambda k: qs.get(k,[""])[0]
         p = u.path
@@ -589,7 +793,8 @@ class H(BaseHTTPRequestHandler):
                 ct = {"css":"text/css; charset=utf-8","js":"application/javascript; charset=utf-8","svg":"image/svg+xml",
                       "png":"image/png","jpg":"image/jpeg","jpeg":"image/jpeg","webp":"image/webp",
                       "mp3":"audio/mpeg","woff2":"font/woff2","woff":"font/woff"}.get(ext, "application/octet-stream")
-                return self.send(open(fp,"rb").read(), ctype=ct)
+                with open(fp, "rb") as handle:
+                    return self.send(handle.read(), ctype=ct)
             return self.send(page("Not found",'<h1>Not found</h1><p><a href="/">Back home</a></p>'), 404)
         elif p == "/": return self.send(home(g("q").strip(), g("panel")))
         elif p == "/browse": return self.send(browse(g("category")))
@@ -599,11 +804,12 @@ class H(BaseHTTPRequestHandler):
             meta = fetch_rss(g("url").strip())
             return self.send(json.dumps(dict(ok=True, **meta) if meta else {"ok":False,"error":"Could not read that feed."}), ctype="application/json; charset=utf-8")
         elif p == "/about": return self.send(page("About", f'''<article class="prose"><h1>About Podcast Stream</h1><p>Podcast Stream helps people discover podcasts by category, rank, and popularity, and lets creators post and promote their channels.</p><h2>How ranking works</h2><p>Every show has a popularity score. Listeners raise it with the Boost button. Overall ranks by all-time popularity; Rising ranks by boosts in the last 7 days, so newer shows can climb without a large lifetime score. New lists shows by the date they were added, newest first. Charts are recalculated on every boost and every new listing.</p><p>The 30 shows in the opening catalog start at 0 popularity. No listener totals were invented for them. When scores tie, the earlier listing ranks higher. Those shows were inserted in the order of the <a href="{e(CATALOG_FILE["chart_url"])}">Apple Podcasts US Top Shows</a> chart updated {e(CATALOG_FILE["chart_updated"])}. Shows from the catalog that were not on that chart follow the charted shows, alphabetically, still at 0. A listener boost is the only thing that adds a point.</p><h2>Where the catalog comes from</h2><p>Titles, publishers, categories, RSS feeds, and Apple Podcasts links were read from the Apple iTunes Lookup API on 13 November 2026. Descriptions were read from each show's RSS feed. Cover art is that show's Apple artwork with the image size set to 1400×1400, after the image URL returned a real image. Listings visitors submit are kept and are not replaced by the catalog.</p><h2>Featured &amp; promoted</h2><p>Creators can request a promoted spot. Promoted shows appear in a clearly labeled strip and never get a higher chart rank for it.</p></article>''', "About"))
+        elif p in ("/stats", "/api/stats"): return self.serve_stats(p)
         elif p == "/api/shows": return self.send(json.dumps(ranked()),ctype="application/json")
         else:
             m = re.fullmatch(r"/show/(\d+)",p)
             if m and (h := show(int(m.group(1)))): return self.send(h)
-        self.send(page("Not found",'<h1>Not found</h1><p><a href="/">Back home</a></p>'),404)
+        self.send(NOT_FOUND_PAGE, 404)
     def do_POST(self):
         n = int(self.headers.get("Content-Length",0) or 0)
         data = urllib.parse.parse_qs(self.rfile.read(min(n,20000)).decode(), keep_blank_values=True)
